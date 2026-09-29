@@ -1,0 +1,28 @@
+{
+  "name": "dsh-sci",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Zero-dependency DeepSeek Harness host tool set for quantitative work: dimension-aware physical unit conversion, CODATA 2022 constant lookup, and Runge-Kutta ODE integration of small systems whose right-hand side is parsed by a hand-written locked-down interpreter (no eval).",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "*",
+    "@deepseek-ai/dsh-tools": "*"
+  },
+  "dsh": {
+    "plugin": {
+      "note": "Host-plane tool plugin, zero runtime dependencies: deterministic pure computation on arguments only (no I/O, no network), so it needs no configuration and no credentials."
+    }
+  }
+}

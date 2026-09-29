@@ -1,0 +1,538 @@
+# 生物科研模式（含 LSF 集群执行）预设 —— **macOS 适配版**。
+#
+# 原版来自 https://github.com/honghufox/dsh-bio-research-preset （Windows / pwsh 环境）。
+# 本文件在保留原预设**全部功能**的前提下，把宿主相关的部分改成 macOS 语义：
+#   · 本机 shell 由 pwsh 改为 bash（`dsh-bash-local`）；Windows 行以 `!!js` 条件保留，
+#     因此同一个 bundle 在 macOS 与 Windows 上都能挂载；
+#   · MCP 子进程的 `command` 不再依赖 PATH 上的 `node` / `python`——macOS 上这两者
+#     通常不存在（系统 `python3` 还是 Xcode 命令行工具的占位符），改为按候选链解析；
+#   · Tavotto 的自管 venv 路径、工作区可信根默认值改为 macOS 形态；
+#   · 原版来自 `G:\dsh\_plugins` 的三个社区工具包（csv / stat / sci）在 npm 上并不存在，
+#     这里改为随 bundle 分发、功能等价的本地实现（`presets/bio-research/plugins/`）。
+#
+# 自包含：预设自带资源在 presets/<id>/ 下，行内引用一律经下面的 bundle 定位器解析，
+# 因此整个 bundle 可放在任意路径、任意机器上，无需安装期改写绝对路径。
+# 依赖产物（node_modules）不随仓库分发，安装后按 dsh.install 重建（见 setup.sh）。
+#
+# ⚠ 关于 baseUrl：**预设子插件的 baseUrl 是 profile 目录，不是 bundle 目录。**
+# 原版 Windows 预设直接写 `new URL('presets/…', baseUrl)`，实测会解析成
+# `<profile>/presets/…`（该路径不存在），于是 MCP server 起不来、技能目录扫不到——
+# 预设表面上"挂载成功"，实际是个空壳。这里改成对三个候选前缀逐个探测、取第一个真实
+# 存在的：bundle 作为 profile 依赖解析出来的 node_modules 软链、安装器放的
+# local-bundles/、以及"baseUrl 就是 bundle 目录"这种情形本身。
+- insert:
+    - id: preset-bio-research
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: bio-research
+        name: '生物科研模式'
+        description: '面向基础生物学科研的 Agent（macOS 版）：文献检索（PubMed/UniProt/KEGG/PDB 等 37 个生物信息 MCP 工具）、数据分析（Python/R）、发表级统计绘图与论文配图微调（内置 Tavotto：版式 override、出版规范预检、真矢量导出）、论文撰写与生信分析等技能，完整保留标准模式的编码能力。'
+        plugins:
+          # The `bio-research` agent preset: the full coding agent from `standard`,
+          # plus a biology-research persona, the local research skills under `skills/`,
+          # a bioinformatics MCP server (PubMed/UniProt/GenBank/Ensembl/KEGG/PDB, 37 tools),
+          # and a vendored Tavotto Codex plugin whose MCP server exposes figure editing,
+          # publication preflight and vector export (`tools/tavotto/`; the differences from
+          # the Codex host are written down in `tools/tavotto/DSH-ADAPTATION.md`).
+          #
+          # This file is an AGENT-PLANE composition. The roster mounts it ONCE under a
+          # standing scope; every session naming it joins by scope parentage, so the
+          # tools and prompt sections registered here cover each joined agent while a
+          # session's own state stays keyed per Session/Agent inside the plugins. The
+          # host composition (`base.cordis.yml` + `web.cordis.yml`) keeps everything a
+          # preset must not own: the registries themselves, the sandbox and approval
+          # stack, persistence, and the model route.
+          #
+          # A service row here MUST sit inside a group carrying an `isolate` realm.
+          # Without one it publishes into the root realm, where it is process-global —
+          # another preset publishing the same name collides, and a host reader would
+          # resolve one preset's instance for every session; `dsh-agent-presets` rejects
+          # that at mount. `true` means an entry-local realm: this standing mount's own
+          # private instance, apart from every other preset's.
+
+          # ── identity ────────────────────────────────────────────────────────────────
+
+          # The preset's own persona, shadowing the deployment default for this agent.
+          # `{{model}}` and `{{cwd}}` resolve from the agent's own route and workspace.
+
+          - id: persona
+            name: '@deepseek-ai/dsh-persona'
+            config:
+              prefix: >-
+                You are a biology research assistant powered by the {{model}} model, running on the DeepSeek Harness. Your working directory is {{cwd}}.
+
+                服务对象是基础生物学科研工作者（分子生物学 / 细胞生物学 / 生物化学方向），研究重点为**基因组学分析（变异/VCF 数据）与生存分析**。在科研全流程中提供帮助：
+
+                【运行环境——macOS】本机是 macOS。本机命令一律用 `bash` 工具执行（**不要写 PowerShell 语法，本机没有 pwsh**）；文件工具（读取/写入/编辑/搜索）作用于本机 macOS 文件系统。需要 Python 时用 `python3`，**但不要调用 `/usr/bin/python3`**——那是 Xcode 命令行工具的占位符，未装 CLT 时会弹窗并返回空输出。DSH 自带运行时（Node 24 + Python 3.12，含 numpy/pandas/python-docx 等）的绝对路径、装包方法、沙箱边界都写在 `bio-research-env` 技能里，涉及环境问题先读它。
+
+                【集群执行——本预设最重要的行为改变】本预设已接入华中农业大学作物遗传改良全国重点实验室高性能计算平台（HPC，LSF 调度）。**集群与本机是两套执行面，必须分清**：
+                - **集群命令一律走 `cluster_exec` 工具**（基于系统 OpenSSH 的持久会话，一次认证后复用，实测后续命令 60–170ms）。它执行在**登录节点**上，默认目录是你在集群上的家目录（`/public/home/<你的用户名>`），环境是 Linux/bash。
+                - `cluster_exec` 每次调用是一条独立的 bash 命令；需要多步时在一条命令里用 `&&`/`;` 串联，或写成脚本（配合文件工具，见下）后再执行。管道、重定向都是 bash 语义。
+                - **本机命令用 `bash` 工具**（macOS）。不要用 bash 去跑集群命令，也不要用 `cluster_exec` 去碰本机文件。
+                - 文件工具（读取/写入/编辑/搜索）作用于**本机 macOS 文件系统**；集群上的文件请在 `cluster_exec` 里用 ls/cat/head/awk 等命令读写，大文件不要整体读进上下文——先看大小（`ls -lh`、`wc -l`），必要时只取摘要或统计量。
+                - 本机与集群之间传文件用 `cluster_upload` / `cluster_download`（scp）。每次传输要**单独认证一次**、消耗一个动态口令时间步，所以多文件请先打成 tar 包再传一个归档。
+                - 本地 MCP 工具（mcp__biotools__* / mcp__ncbi__* / mcp__zotero__* / mcp__tavotto__*）仍运行在本机，与集群通道互不影响。
+
+                【LSF 作业调度——集群上必须遵守】本预设已加载 ncpgr-lsf 技能（含集群官方蒸馏的 LSF 指南与作业模板），提交作业前**先读它**：
+                - **联网与计算要分清**：计算节点**不联网**，所以下载数据/参考基因组、装软件包这类**需要网络的任务必须在登录节点做**；而比对/定量/组装/变异调用这类**纯计算一律写成 `.lsf` 用 bsub 提交**——集群欢迎语明确写着监控程序会自动查杀登录节点上的重负载进程。小规模试跑用 `bsub -q interactive -Is bash` 进交互队列（注意交互队列每用户上限 2 个作业，用完 `exit`）。
+                - 常用：`bsub < job.lsf` 提交、`bjobs` 看状态、`bpeek <jobid>` 看输出、`bkill <jobid>` 终止、`bqueues`/`bhosts` 看队列与节点负载。
+                - 队列与资源上限、极简作业模板、module 加载软件、存储配额与数据管理规则见 ncpgr-lsf / ncpgr-software / ncpgr-data-manage 技能；集群预装 1000+ 生信软件，用 `module av <名字>` 查询、`module load` 加载，**不要重复安装集群已有的软件**。
+                - 存储纪律：`/public/home/<用户名>` 有配额（`diskquota` 查看），集群只放使用中的数据，结果及时取回、中间文件及时清理。
+
+                【文献检索与综述】优先使用 biotools MCP 工具（mcp__biotools__search_pubmed / get_publication_details / get_publication_abstract）检索 PubMed，也可用 web_search。整理文献、撰写综述时给出 PMID/DOI，绝不编造文献。
+
+                【基因组学与变异分析】VCF 变异数据处理、过滤、注释与可视化用 variant-analysis 技能（Python vcfpy / R vcfR / biomaRt）；集群上有 GATK / deepvariant / parabricks 等完整流程工具时，可用 ncpgr-software 技能查到模块名后按 LSF 作业提交。
+
+                【生存分析】KM / log-rank / Cox 回归 / 时间依赖 ROC / 竞争风险 / 列线图 / 表达-生存分析用 survival-analysis 技能（Python lifelines + R survival/survminer/rms）。
+
+                【数据分析】用 Python（pandas / numpy / scipy / statsmodels / seaborn / lifelines）或 R 编写脚本；数据文件放在工作区，脚本可重复运行；统计检验需说明适用条件，报告效应量与 p 值，必要时做多重比较校正。**小规模精确统计不必写脚本**：描述统计/百分位/频数/相关系数用 `stat` 工具，CSV 文本的解析/查询/统计用 `csv` 工具，单位换算/物理常数/ODE 积分用 `unit_convert` / `constant_lookup` / `ode_simulate`。
+
+                【图像绘制】产出发表级图表：matplotlib / seaborn 或 R ggplot2，输出 PNG(300dpi)/SVG/PDF 到 figures/ 目录，注意期刊尺寸与色盲友好配色。本预设内置 Tavotto（tavotto-figure 技能 + 9 个 mcp__tavotto__* 工具）用于交付前的版式微调：画完先调 mcp__tavotto__tavotto_health，再用 tavotto_open_figure 打开、tavotto_apply_overrides 改图例/字号/线宽/刻度（patches 是**全量列表**，不要发增量）、tavotto_preflight 按出版规范体检、tavotto_export 导出真矢量 PDF；已有图只要改宽度/字体/最小字号时走 tavotto_normalize_figure 保留式规范化，**不要重画**。DSH 不出内嵌画布，所有微调都走工具；工具不可用时按 tavotto-figure 技能的恢复路径排查，不要重装预设。
+
+                【论文撰写】按 IMRaD 结构组织；提供学术英语润色、摘要撰写、参考文献格式化（给出 PMID/DOI 即可）。LaTeX（TinyTeX，见 latex-compile 技能）与 pandoc / python-docx（Markdown 转 Word/PDF，见 document-output 技能）支持完整的论文产出流程；**未安装时先读技能的安装指引，用 Homebrew 装，不要假装它们已就绪**。
+
+                【生信分析】序列获取 / 比对 / BLAST / 系统发育可用 biotools MCP 的 37 个工具；预设中还预装了 ncbi-mcp 与 mcp-zotero（后者默认禁用，按预设里的注释启用）。集群侧的重计算流程走 ncpgr-bio-router / ncpgr-software 技能。
+
+                默认用中文回复；用户要求或撰写英文论文时用英文输出。
+
+          - id: agent-instructions
+            name: '@deepseek-ai/dsh-agent-instructions'
+            config:
+              maxBytes: 65536
+
+          # ── shell（命令落点在本机；集群通道见下方 cluster-ssh 组）────────────────────
+
+          # ⚠ 这里**故意没有**顶层的 `tool-bash` / `tool-pwsh` 行。
+          #
+          # 原版在顶层挂了一对（按平台条件二选一），又在下面的 cluster-ssh 隔离组里
+          # 再挂了一对同名工具。`isolate` 隔离的是**服务**（`shell`），不是**注册作用域**：
+          # 两行落在同一个 scope 里，于是第二个注册同一个 prompt section 时直接抛
+          #
+          #   tool-bash-cluster (@deepseek-ai/dsh-tool-bash):
+          #     prompt section "tool:bash" is already registered in this scope
+          #
+          # 该异常会让 `dsh-agent-presets` 把整个预设标成 broken（GUI 里就是「预设加载失败」）。
+          # 实测确认：原版这个结构在 macOS 上必然失败，Windows 上同理（那对是 pwsh）。
+          #
+          # 所以本机 shell 工具**只由 cluster-ssh 组提供**：组内既有 `dsh-cluster-ssh`
+          # 的集群工具，也有「本地 shell provider + 本地 shell 工具」。两处注册合一，
+          # `bash` 工具依旧执行本机命令，`cluster_exec` 走集群，职责不变。
+
+          # ── filesystem ──────────────────────────────────────────────────────────────
+
+          # Both register into the host `tools` registry and provide nothing, so
+          # they need no realm. The `fs` service and its policy stay in the host.
+
+          # ── 集群执行通道（LSF / SSH）─────────────────────────────────────────────────
+
+          # 本预设相对标准生物科研模式的新增能力：**集群命令经 cluster_exec 工具落到登录节点**，
+          # 而本机 shell、文件与本地 MCP 全部保持原样。
+          #
+          # 为什么不是 dsh-ssh：dsh-ssh 的传输层用 ssh2，而本集群（OpenSSH 7.4）实测中 ssh2
+          # 能完成认证、却在随后的 CHANNEL_OPEN(session) 上被服务器直接断开 TCP（无
+          # CHANNEL_OPEN_FAILURE）。已逐项排除加密套件（aes128-ctr 同样失败）、客户端 ident、
+          # 登录限速等因素；同一账号用系统 OpenSSH 完全正常。因此集群通道改用系统 ssh
+          # （macOS 自带 /usr/bin/ssh，本机实测 OpenSSH 10.3，`SSH_ASKPASS_REQUIRE=force` 可用）。
+          #
+          # 为什么不用 `isolate` 隔离 subprocess：那会连带把宿主 shell 工具的 `ctx.subprocess`
+          # 换成远程实现，且 dsh-cluster-ssh 并不注册 subprocess（它只提供工具），隔离没有收益。
+          #
+          # 为什么本机 shell 仍放在隔离组里：组内的 shell 工具与宿主基座**同名**，根作用域
+          # 重复注册会冲突。组内挂「本地 shell provider + shell 工具」，本机命令继续执行
+          # **本机**命令；集群命令走 `cluster_exec`。两者职责清晰，互不影响。
+          #
+          # macOS 用 `dsh-bash-local` + `dsh-tool-bash`（`bash -c`）；Windows 保留
+          # `dsh-pwsh-local` + `dsh-tool-pwsh`。两侧都带平台条件，只有一边会激活，
+          # 于是隔离域里的 `shell` 服务恰有一个提供者。
+          - id: cluster-ssh
+            name: cordis:group
+            group: true
+            isolate:
+              shell: true
+            config:
+              # 集群执行通道：基于系统 OpenSSH，一次认证后复用同一交互式会话
+              # （实测：认证 ~1s，后续命令 ~60-170ms；无 PTY 回显噪音，输出按字节上限截断）
+              - id: cluster-ssh-tools
+                name: 'dsh-cluster-ssh'
+
+              # 本机 shell（macOS / Linux）：隔离组内提供，避免与宿主基座同名冲突
+              - id: bash-cluster
+                name: '@deepseek-ai/dsh-bash-local'
+                disabled: !!js process.platform === 'win32'
+
+              - id: tool-bash-cluster
+                name: '@deepseek-ai/dsh-tool-bash'
+                disabled: !!js process.platform === 'win32'
+
+              # 本机 shell（Windows）：保留原预设的行为
+              - id: pwsh-cluster
+                name: '@deepseek-ai/dsh-pwsh-local'
+                disabled: !!js process.platform !== 'win32'
+
+              - id: tool-pwsh-cluster
+                name: '@deepseek-ai/dsh-tool-pwsh'
+                disabled: !!js process.platform !== 'win32'
+
+
+          - id: tool-fs
+            name: '@deepseek-ai/dsh-tool-fs'
+
+          - id: tool-fs-search
+            name: '@deepseek-ai/dsh-tool-fs-search'
+            config:
+              sampleOverCapGlobResults: false
+
+          # ── data & stats tools ──────────────────────────────────────────────────────
+
+          # 原 Windows 预设从 `G:\dsh\_plugins` 以 file: 链接挂了三个社区工具包
+          # （`@deepseek-ai/dsh-tool-csv`、`@deepseek-ai/dsh-tool-stat`、`dsh-sci`）。
+          # 这三个包**不在 npm 上**（查询返回 404），也没有随原仓库分发，无法原样搬运。
+          # 这里改为随 bundle 分发的等价本地实现，对齐原注释声明的能力：
+          #   · dsh-tool-csv : RFC 4180 CSV **文本**的 parse/describe/query/stats
+          #                    （自写解析器处理引号、`""` 转义、字段内换行；256KB 上限）
+          #   · dsh-tool-stat: 有限数值数组的 describe/percentile/frequency/correlation
+          #                    （Neumaier 补偿求和 + Welford 方差 + 线性插值百分位 + Spearman 中位秩）
+          #   · dsh-sci      : 量纲感知的单位换算、CODATA 物理常数、Runge-Kutta ODE 积分
+          # 三者都只往 host `tools` 注册表注册工具、不 provide 任何服务，所以不需要 realm。
+          # 它们以 file: 依赖写进 profile，由 setup.sh 安装。
+          - id: tool-csv
+            name: 'dsh-tool-csv'
+
+          - id: tool-stat
+            name: 'dsh-tool-stat'
+
+          - id: dsh-sci
+            name: 'dsh-sci'
+
+          # ── background jobs ────────────────────────────────────────────────────────
+
+          # Only the model-facing controls. The task REGISTRY stays on the host plane:
+          # its producers sit outside any realm this file could put it in — `tool-bash`
+          # above resolves it with `ctx.get`, and an entry-local realm here is invisible
+          # to every sibling row, so `run_in_background` would answer "background jobs
+          # unavailable" while these controls sat in the catalog. The registry is keyed by
+          # owning agent anyway, so one host instance serves every session. What a preset
+          # chooses is whether its agent can collect and stop background work at all.
+          - id: tool-jobs
+            name: '@deepseek-ai/dsh-tool-jobs'
+
+          # ── skills ──────────────────────────────────────────────────────────────────
+
+          # The skill REGISTRY lives in the host composition and is layered per scope:
+          # these rows register into THIS preset's layer of it, so they need no realm.
+          # `skill-filesystem` contributes local-root discovery for agents on this preset
+          # and the research skills shipped inside the preset directory (via
+          # `customSkillDirs`, resolved from `baseUrl` like the shipped `cordis` preset
+          # does), and `tool-skill` gives them the catalog and loader; the merged catalog
+          # also carries whatever the deployment registered globally (repository plugins).
+          - id: skill-filesystem
+            name: '@deepseek-ai/dsh-skill-filesystem'
+            config:
+              customSkillDirs:
+                - !!js "(() => { const fs = process.getBuiltinModule('node:fs'); const u = process.getBuiltinModule('node:url'); const rel = 'presets/bio-research/skills/'; for (const prefix of ['node_modules/bio-research-preset/', 'local-bundles/bio-research-preset/', '']) { const found = u.fileURLToPath(new URL(prefix + rel, baseUrl)); if (fs.existsSync(found)) return found } return u.fileURLToPath(new URL(rel, baseUrl)) })()"
+                # Tavotto 的 vendor 副本自带 `skills/tavotto-figure/`（SKILL.md + references +
+                # scripts，`mcp/server.py` 按 `../skills/…` 找它的 handoff.py）。直接把那一层
+                # 当第二个 skill root 扫，胜过把技能目录复制一份出来——复制品会和
+                # `tools/tavotto/skills/` 悄悄漂开。
+                - !!js "(() => { const fs = process.getBuiltinModule('node:fs'); const u = process.getBuiltinModule('node:url'); const rel = 'presets/bio-research/tools/tavotto/skills/'; for (const prefix of ['node_modules/bio-research-preset/', 'local-bundles/bio-research-preset/', '']) { const found = u.fileURLToPath(new URL(prefix + rel, baseUrl)); if (fs.existsSync(found)) return found } return u.fileURLToPath(new URL(rel, baseUrl)) })()"
+
+          - id: tool-skill
+            name: '@deepseek-ai/dsh-tool-skill'
+
+          # ── bioinformatics MCP ──────────────────────────────────────────────────────
+
+          # The biotools MCP server (37 tools: PubMed / UniProtKB / GenBank / Ensembl /
+          # KEGG / PDB) runs locally from the preset's own `tools/` directory, spawned
+          # over stdio. It consumes the host `tools` registry and provides nothing, so it
+          # needs no realm. `failOnStartupError: false` keeps the preset mountable even if
+          # the server is temporarily unavailable; `toolCallTimeoutMs` gives bioinformatics
+          # calls (BLAST, alignments, trees) headroom over the default 60s.
+          #
+          # `command` 不再写裸 `node`：macOS 上系统**没有** node（DSH 桌面版自带运行时，
+          # 但不进 PATH），裸 `node` 会直接 ENOENT。这里按候选链挑一个真实存在的解释器。
+          - id: mcp-biotools
+            name: '@deepseek-ai/dsh-mcp-client'
+            config:
+              serverName: biotools
+              transport: stdio
+              command: !!js "(() => { const fs = process.getBuiltinModule('node:fs'); const os = process.getBuiltinModule('node:os'); const path = process.getBuiltinModule('node:path'); const dshHome = process.env.DSH_HOME || path.join(os.homedir(), '.dsh'); const candidates = [process.env.DSH_MCP_NODE]; try { for (const entry of fs.readdirSync(path.join(dshHome, 'dsh-runtimes'))) candidates.push(path.join(dshHome, 'dsh-runtimes', entry, 'dependencies', 'node', 'bin', 'node')) } catch (error) { /* 运行时目录尚未建立 */ } candidates.push('/opt/homebrew/bin/node', '/usr/local/bin/node'); for (const candidate of candidates) { if (typeof candidate === 'string' && candidate !== '' && fs.existsSync(candidate)) return candidate } return process.execPath })()"
+              args:
+                - !!js "(() => { const fs = process.getBuiltinModule('node:fs'); const u = process.getBuiltinModule('node:url'); const rel = 'presets/bio-research/tools/biotools/node_modules/bach-biotools-server/build/index.js'; for (const prefix of ['node_modules/bio-research-preset/', 'local-bundles/bio-research-preset/', '']) { const found = u.fileURLToPath(new URL(prefix + rel, baseUrl)); if (fs.existsSync(found)) return found } return u.fileURLToPath(new URL(rel, baseUrl)) })()"
+              failOnStartupError: false
+              toolCallTimeoutMs: 120000
+
+          # ── NCBI E-utilities MCP ─────────────────────────────────────────────────────
+
+          # ncbi-mcp（PyPI 0.1.4）提供 E-utilities 批量检索与基因/基因组汇总工具。
+          # 依赖的 mcp SDK 必须是 1.x（2.0 移除了 FastMCP API）。两者都装在预设自管 venv
+          # 里（setup.sh 建在 $DSH_HOME/bio-research/venv），所以 `command` 指向该 venv 的
+          # python3——不用系统的 `python3`（macOS 上那是 Xcode 占位符，会弹窗且零输出）。
+          # 如需提高限速，可在 https://www.ncbi.nlm.nih.gov/account/settings/ 免费申请
+          # API Key 后填入下方 NCBI_API_KEY（或设置同名环境变量）。
+          - id: mcp-ncbi
+            name: '@deepseek-ai/dsh-mcp-client'
+            config:
+              serverName: ncbi
+              transport: stdio
+              command: !!js "(() => { const fs = process.getBuiltinModule('node:fs'); const os = process.getBuiltinModule('node:os'); const path = process.getBuiltinModule('node:path'); const dshHome = process.env.DSH_HOME || path.join(os.homedir(), '.dsh'); const candidates = [process.env.BIO_PRESET_PYTHON, process.env.NCBI_MCP_PYTHON, path.join(dshHome, 'bio-research', 'venv', 'bin', 'python3')]; try { for (const entry of fs.readdirSync(path.join(dshHome, 'dsh-runtimes'))) candidates.push(path.join(dshHome, 'dsh-runtimes', entry, 'dependencies', 'python', 'bin', 'python3')) } catch (error) { /* 运行时目录尚未建立 */ } candidates.push('/opt/homebrew/bin/python3', '/usr/local/bin/python3'); for (const candidate of candidates) { if (typeof candidate === 'string' && candidate !== '' && fs.existsSync(candidate)) return candidate } return 'python3' })()"
+              args:
+                - !!js "(() => { const fs = process.getBuiltinModule('node:fs'); const u = process.getBuiltinModule('node:url'); const rel = 'presets/bio-research/tools/ncbi/run-ncbi-mcp.py'; for (const prefix of ['node_modules/bio-research-preset/', 'local-bundles/bio-research-preset/', '']) { const found = u.fileURLToPath(new URL(prefix + rel, baseUrl)); if (fs.existsSync(found)) return found } return u.fileURLToPath(new URL(rel, baseUrl)) })()"
+              env:
+                # NCBI E-utilities 要求带上联系邮箱（限速/封禁时他们会联系你）。
+                # 填你自己的，或启动 dsh 前设同名环境变量。
+                NCBI_EMAIL: !!js "process.env.NCBI_EMAIL ?? 'you@example.com'"
+                NCBI_API_KEY: !!js "process.env.NCBI_API_KEY ?? ''"
+              failOnStartupError: false
+              toolCallTimeoutMs: 60000
+
+          # ── Zotero 文献库 MCP（默认禁用，需凭证）────────────────────────────────────
+
+          # mcp-zotero（npm 1.0.6，已装在预设 tools/zotero 下）通过 Zotero 官方 Web API
+          # 检索/管理你的文献库。服务器在缺少凭证时会直接退出，因此默认禁用。启用步骤：
+          #   1. 在 https://www.zotero.org/settings/keys 创建 API Key
+          #   2. 用该 Key 请求 https://api.zotero.org/keys/current 获取你的 User ID
+          #   3. 填入下方 ZOTERO_API_KEY / ZOTERO_USER_ID，并删除 `disabled: true`
+          - id: mcp-zotero
+            name: '@deepseek-ai/dsh-mcp-client'
+            disabled: true
+            config:
+              serverName: zotero
+              transport: stdio
+              command: !!js "(() => { const fs = process.getBuiltinModule('node:fs'); const os = process.getBuiltinModule('node:os'); const path = process.getBuiltinModule('node:path'); const dshHome = process.env.DSH_HOME || path.join(os.homedir(), '.dsh'); const candidates = [process.env.DSH_MCP_NODE]; try { for (const entry of fs.readdirSync(path.join(dshHome, 'dsh-runtimes'))) candidates.push(path.join(dshHome, 'dsh-runtimes', entry, 'dependencies', 'node', 'bin', 'node')) } catch (error) { /* 运行时目录尚未建立 */ } candidates.push('/opt/homebrew/bin/node', '/usr/local/bin/node'); for (const candidate of candidates) { if (typeof candidate === 'string' && candidate !== '' && fs.existsSync(candidate)) return candidate } return process.execPath })()"
+              args:
+                - !!js "(() => { const fs = process.getBuiltinModule('node:fs'); const u = process.getBuiltinModule('node:url'); const rel = 'presets/bio-research/tools/zotero/node_modules/mcp-zotero/build/server.js'; for (const prefix of ['node_modules/bio-research-preset/', 'local-bundles/bio-research-preset/', '']) { const found = u.fileURLToPath(new URL(prefix + rel, baseUrl)); if (fs.existsSync(found)) return found } return u.fileURLToPath(new URL(rel, baseUrl)) })()"
+              env:
+                ZOTERO_API_KEY: ''
+                ZOTERO_USER_ID: ''
+              failOnStartupError: false
+
+          # ── Tavotto 科研配图 MCP（vendor 自 Codex 插件；详见 tools/tavotto/DSH-ADAPTATION.md）
+
+          # Tavotto 的 Codex 插件（发行分支 plugin-stable，v0.15.0）整包 vendor 到
+          # `tools/tavotto/`：本地 stdio MCP server + `tavotto-figure` 技能 + 内嵌画布产物。
+          # 它只往 host `tools` 注册表里注册工具、不 provide 任何服务，所以不需要 realm。
+          #
+          # 与 Codex 的四处差异，都是 DSH 适配（macOS 版把 Windows 路径换成 macOS 形态）：
+          #
+          #   1. **启动器不许「交棒」（最重要的一条）。** 上游的 `mcp/server.py` 是两层：
+          #      当前解释器能 `import tavotto.engine` 就直接跑；否则找一个能 import 的解释器
+          #      再用 `os.execv` 把**自己这个进程**的映像换掉（上游注释说「同一个进程 =
+          #      stdio 原样继承」）。这条在 DSH 上会死：mcp-client 经 Node 的
+          #      `child_process` 管道起子进程，换成别的映像之后那对 stdin/stdout 不再接得上
+          #      ——server 侧一切正常，`initialize` 却永远没有回应。更糟的是 DSH 的 standing
+          #      mount 会一直等这个 apply，而 MCP SDK 的 `connect` 不理会取消信号
+          #      ⇒ 预设挂不上，页面上的停止按钮也停不下来。
+          #      所以这里做两件事：`command` 直接给一个**已经装着引擎**的解释器（候选链第一位
+          #      就是预设自管 venv），并且设 `TAVOTTO_MCP_EXECED=1` 把交棒整条路关掉。
+          #      关掉之后最坏情况只是降级 server——它握手正常、`tools/list` 只列
+          #      `tavotto_health`，绝不卡死。
+          #
+          #   2. **没有内嵌画布。** DSH 的 mcp-client 只桥接 MCP 的 tools（resources 与
+          #      prompts 没有消费者），所以 `ui://tavotto/canvas/v1.html` 不会渲染。
+          #      这不是功能损失：Tavotto 自己的文档写明「没有 UI 的 host 里这九个工具就能
+          #      走完整条流程」——打开 → 改 → 预检 → 导出，只少了用鼠标拖这一种输入方式。
+          #
+          #   3. **工作区可信根只能走环境变量。** DSH 的 client 在 initialize 里声明空
+          #      capabilities（既不声明 roots 也不声明 elicitation），Tavotto 的
+          #      RootAuthority 因此跳过 host 那两档，落到 `TAVOTTO_MCP_ROOTS`。macOS 上这里
+          #      默认钉**用户主目录**（`os.homedir()`，即 /Users/<你>）；要换、要加，就在启动
+          #      dsh 前设同名环境变量（多个根用 `os.pathsep` 分隔，macOS 上是 `:`，例如
+          #      `/Users/you:/Users/you/Documents/figures`）。不在可信根内的路径每个 open 都回
+          #      `path_out_of_scope`，一个根都没有则回 `no_workspace_root`——
+          #      `project_path` 只是候选，不能自证权限。
+          #
+          #   4. **`command` 不写上游清单里的 `python3`。** 上游为 Windows 的 App Execution
+          #      Alias 做过一跳；macOS 上对应的问题是 `/usr/bin/python3` 是 Xcode 命令行工具
+          #      的占位符（命令在、未装 CLT 时弹窗并零输出）。这里按优先级挑一个**存在**的
+          #      解释器：`TAVOTTO_MCP_PYTHON` → `TAVOTTO_WORKER_PYTHON` → 预设自管 venv
+          #      （`$DSH_HOME/bio-research/venv`，setup.sh 建的那个，**引擎就装在这里**）→
+          #      Tavotto 自管 venv（`~/Library/Application Support/Tavotto/mcp-runtime/venv`，
+          #      `--provision` 建的那个）→ DSH 主运行时 python → Homebrew python3。兜底也安全：
+          #      第 1 条的 `TAVOTTO_MCP_EXECED=1` 保证它不会去交棒。
+          #
+          # 引擎（PyPI `tavotto`）未装时，工具列表里只有 `tavotto_health`。装机命令：
+          #   $DSH_HOME/bio-research/venv/bin/python3 tools/tavotto/mcp/server.py --provision
+          # command / TAVOTTO_* 都是**挂载时**读的，已经建好的 standing mount 不会重来：
+          # 装完引擎或改完本行，都要**重启 dsh** 才生效。
+          #
+          # `toolCallTimeoutMs` 给到 30 分钟：Tavotto 首次打开一张图要跑一遍用户的绘图
+          # 脚本，heavy 的图是分钟级；上游清单里也是 `tool_timeout_sec: 1800`。
+          - id: mcp-tavotto
+            name: '@deepseek-ai/dsh-mcp-client'
+            config:
+              serverName: tavotto
+              transport: stdio
+              command: !!js "(() => { const fs = process.getBuiltinModule('node:fs'); const os = process.getBuiltinModule('node:os'); const path = process.getBuiltinModule('node:path'); const home = os.homedir(); const dshHome = process.env.DSH_HOME || path.join(home, '.dsh'); const candidates = [process.env.TAVOTTO_MCP_PYTHON, process.env.TAVOTTO_WORKER_PYTHON, path.join(dshHome, 'bio-research', 'venv', 'bin', 'python3'), path.join(home, 'Library', 'Application Support', 'Tavotto', 'mcp-runtime', 'venv', 'bin', 'python3')]; try { for (const entry of fs.readdirSync(path.join(dshHome, 'dsh-runtimes'))) candidates.push(path.join(dshHome, 'dsh-runtimes', entry, 'dependencies', 'python', 'bin', 'python3')) } catch (error) { /* 运行时目录尚未建立 */ } candidates.push('/opt/homebrew/bin/python3', '/usr/local/bin/python3'); for (const candidate of candidates) { if (typeof candidate === 'string' && candidate !== '' && fs.existsSync(candidate)) return candidate } return 'python3' })()"
+              args:
+                - !!js "(() => { const fs = process.getBuiltinModule('node:fs'); const u = process.getBuiltinModule('node:url'); const rel = 'presets/bio-research/tools/tavotto/mcp/server.py'; for (const prefix of ['node_modules/bio-research-preset/', 'local-bundles/bio-research-preset/', '']) { const found = u.fileURLToPath(new URL(prefix + rel, baseUrl)); if (fs.existsSync(found)) return found } return u.fileURLToPath(new URL(rel, baseUrl)) })()"
+              cwd: !!js "(() => { const fs = process.getBuiltinModule('node:fs'); const u = process.getBuiltinModule('node:url'); const rel = 'presets/bio-research/tools/tavotto'; for (const prefix of ['node_modules/bio-research-preset/', 'local-bundles/bio-research-preset/', '']) { const found = u.fileURLToPath(new URL(prefix + rel, baseUrl)); if (fs.existsSync(found)) return found } return u.fileURLToPath(new URL(rel, baseUrl)) })()"
+              env:
+                TAVOTTO_MCP_ROOTS: !!js "process.env.TAVOTTO_MCP_ROOTS ?? process.getBuiltinModule('node:os').homedir()"
+                # 关掉启动器的 os.execv 交棒（见上方第 1 条）：DSH 的 stdio 管道经不起换映像。
+                TAVOTTO_MCP_EXECED: '1'
+              failOnStartupError: false
+              toolCallTimeoutMs: 1800000
+
+          # ── goals ───────────────────────────────────────────────────────────────────
+
+          # Only the model-facing tool. The goal SERVICE, its session driver, and the
+          # `/goal` command stay on the host plane: the Gateway serves the goal domain as
+          # Remote endpoints whose receiver comes from a generated descriptor, so it
+          # resolves `goals` on the host and an entry-local realm here would hide it. The
+          # registry is keyed by session anyway, so one host instance serves every
+          # session. What a preset chooses is whether its agent can call the goal tool.
+          - id: tool-goal
+            name: '@deepseek-ai/dsh-tool-goal'
+
+          # ── plan mode ───────────────────────────────────────────────────────────────
+
+          # Plan state is per-agent by nature, so an entry-local realm is not a
+          # workaround here — it is the correct lifetime.
+          - id: planning
+            name: cordis:group
+            group: true
+            isolate:
+              planMode: true
+            config:
+              - id: plan-mode
+                name: '@deepseek-ai/dsh-plan-mode'
+                config:
+                  section: |
+                        You are in plan mode. Stay in plan mode until exit_plan_mode succeeds or the user switches the session mode. Imperative language to implement changes means plan the implementation, not execute it. A user's conversational agreement — including an answer confirming something you asked — approves nothing and does not end plan mode; fold the confirmed decision into the plan and submit it through exit_plan_mode.
+
+                        Explore first. Use non-mutating reads, searches, static analysis, and checks to ground the plan in the actual repository. Do not edit or write files, change configuration, run formatters or code generation that rewrites tracked files, commit, or otherwise carry out the plan. Prefer existing functions and patterns over new machinery.
+
+                        The tool catalog stays the same across modes for request-cache stability. These plan-mode rules override any later tool description or guidance that suggests using mutation tools; those tools remain listed to keep the tool catalog unchanged. Do not use todo_write to track this planning phase: it tracks implementation after an approved plan, while the plan itself belongs in exit_plan_mode.
+
+                        Resolve discoverable facts by inspection. Use ask_user_question only for user-owned choices or material ambiguity that inspection cannot answer. Do not ask the user where code lives or how current behavior works when you can find out.
+
+                        Make the plan decision-complete: state the goal and success criteria; group implementation changes by subsystem; identify public API, schema, and data-flow changes; cover edge cases, failure modes, tests, acceptance criteria, and explicit assumptions. Keep it concise enough to review but detailed enough that another engineer can implement it without making design decisions.
+
+                        When ready, call exit_plan_mode with the complete plan markdown, starting with a # title. Make exit_plan_mode the only and final tool call in that assistant response: it presents the plan for approval, and implementation begins only in a later step after approval. Do not paste the final plan as a plain reply or ask "should I proceed?" through prose or ask_user_question. If review rejects it, incorporate the feedback and present again. If the review channel is unavailable or aborted, stay in plan mode and ask the user to switch modes manually; do not proceed with implementation.
+
+          # ── compaction ──────────────────────────────────────────────────────────────
+
+          # `compaction-basic` reads `toolResultPrune` through `ctx.get`, so the pruner must
+          # share this realm rather than sit outside it.
+          #
+          # `tokenMeter` is deliberately NOT in this realm: the meter stays on the HOST
+          # plane, and the rows here resolve that one instance. It takes no configuration,
+          # keys every fold by Session, and owns the context-meter projection units the
+          # browser reads for every session — behind a realm those units would come and go
+          # with whichever presets happen to be mounted. What a preset chooses is whether
+          # its agent compacts at all, which is `compaction-basic` below.
+          - id: compaction
+            name: cordis:group
+            group: true
+            isolate:
+              compaction: true
+              toolResultPruner: true
+            config:
+              - id: compaction-basic
+                name: '@deepseek-ai/dsh-compaction-basic'
+
+              - id: command-compact
+                name: '@deepseek-ai/dsh-command-compact'
+
+              - id: tool-result-pruner
+                name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
+                config:
+                  thresholdChars: 8192
+                  headChars: 4096
+                  tailChars: 1024
+
+          # ── delegation and workflows ────────────────────────────────────────────────
+
+          # The `subagents` registry and its spawn/fork backends live in the HOST
+          # composition: the registry is a process singleton whose cross-session queries
+          # the api-proxy serves to the browser, and a provider name may only be
+          # registered once. This preset contributes the delegation TOOLS, which resolve
+          # that host registry.
+          #
+          # `workflows` is different — nothing outside an agent reads it — so every row
+          # that reaches it shares one entry-local realm here, and a consumer left
+          # outside would resolve a host registry this preset does not populate.
+          #
+          # `tool-subagent-report` is host-plane for the same reason as the registry,
+          # not because a preset may not want it: it registers a CONTINUABLE SETUP on
+          # that singleton rather than a tool this agent calls, and the setup list is
+          # not scope-aware — one copy per mounted preset means every child gets
+          # `report` registered once per live session, which throws on the second.
+          - id: delegation
+            name: cordis:group
+            group: true
+            isolate:
+              workflowEngine: true
+            config:
+              - id: tool-subagent-control
+                name: '@deepseek-ai/dsh-tool-subagent-control'
+
+              - id: tool-subagent-list-agents
+                name: '@deepseek-ai/dsh-tool-subagent-control/list-agents'
+
+              - id: tool-subagent
+                name: '@deepseek-ai/dsh-tool-subagent'
+                config:
+                  provider: spawn
+                  toolName: subagent
+                  backgroundMode: continuable
+
+              - id: tool-subagent-fork
+                name: '@deepseek-ai/dsh-tool-subagent'
+                config:
+                  provider: fork
+                  toolName: subagent_fork
+                  backgroundMode: continuable
+
+              # Product providers are host-plane singletons. Copy this preset, then
+              # remove `disabled` from either ordinary tool row to expose that product
+              # only to agents composed from the copy.
+              - id: tool-subagent-codex
+                name: '@deepseek-ai/dsh-tool-subagent'
+                disabled: true
+                config:
+                  provider: codex
+                  toolName: subagent_codex
+                  enableRunInBackground: false
+                  maxDepth: provider-managed
+
+              - id: tool-subagent-claude-code
+                name: '@deepseek-ai/dsh-tool-subagent'
+                disabled: true
+                config:
+                  provider: claude-code
+                  toolName: subagent_claude_code
+                  enableRunInBackground: false
+                  maxDepth: provider-managed
+
+              - id: workflow-ptc
+                name: '@deepseek-ai/dsh-workflow-ptc'
+                config:
+                  provider: spawn
+
+              - id: tool-workflow
+                name: '@deepseek-ai/dsh-tool-workflow'
+
+              - id: tool-ralph
+                name: '@deepseek-ai/dsh-tool-ralph'
+                config:
+                  subagentProvider: spawn
+                  maxRounds: 64
+
+          # ── remaining model-facing rows ─────────────────────────────────────────────
+
+          - id: tool-ask-user
+            name: '@deepseek-ai/dsh-tool-ask-user'
+
+          - id: tool-todo
+            name: '@deepseek-ai/dsh-tool-todo'
+            config:
+              allowParallelInProgress: true
+
+          # The `web` service and its search provider stay in the host composition; only
+          # the model-facing tool is per-session.
+          - id: tool-web
+            name: '@deepseek-ai/dsh-tool-web'
+            config:
+              fetch: false
+              searchTimeoutMs: 60000

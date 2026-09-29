@@ -1,0 +1,28 @@
+{
+  "name": "dsh-tool-stat",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Zero-dependency descriptive statistics host tool for DeepSeek Harness: describe / percentile / frequency / correlation over finite numeric arrays, using Neumaier compensated summation, Welford variance, NumPy-linear percentiles and midrank Spearman.",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "*",
+    "@deepseek-ai/dsh-tools": "*"
+  },
+  "dsh": {
+    "plugin": {
+      "note": "Host-plane zero-dependency statistics tool: one 'stat' tool covering describe/percentile/frequency/correlation with strict finite-number hygiene and never-NaN output."
+    }
+  }
+}

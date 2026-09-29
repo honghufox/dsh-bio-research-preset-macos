@@ -1,0 +1,8 @@
+# pnpm 生成的构建脚本白名单。
+#
+# mcp-zotero 的依赖树里有 core-js-pure，它带一个 postinstall 脚本；那个脚本只打印
+# 资助提示，对功能没有任何影响。pnpm 10+ 默认不执行依赖的构建脚本，并会把它记成
+# 「被忽略的构建」（严格模式下还会让 install 失败）。这里显式设为 false：既不再询问，
+# 也不会因为忽略它而报错（setup.sh 另外传了 --config.strict-dep-builds=false 兜底）。
+allowBuilds:
+  core-js-pure: false

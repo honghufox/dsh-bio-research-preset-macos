@@ -1,0 +1,28 @@
+{
+  "name": "dsh-tool-csv",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Zero-dependency DeepSeek Harness host tool that parses, queries and summarises RFC 4180 CSV text with a hand-written parser and a safe hand-written where-expression grammar (no eval).",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "*",
+    "@deepseek-ai/dsh-tools": "*"
+  },
+  "dsh": {
+    "plugin": {
+      "note": "Host-plane tool plugin, zero runtime dependencies: parses CSV text given as a string (never a path), so it performs no I/O and needs no configuration."
+    }
+  }
+}

@@ -1,0 +1,44 @@
+{
+  "name": "bio-research-preset",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "生物科研模式（含 LSF 集群执行）DSH Agent 预设 —— macOS 适配版。自包含 bundle：行内声明 + 随包分发的预设资源。",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./package.json": "./package.json",
+    "./cordis.patch.yml": "./cordis.patch.yml"
+  },
+  "scripts": {
+    "setup": "./setup.sh",
+    "check": "./setup.sh --check"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "install": {
+      "note": "下面的目录随 bundle 分发但不含 node_modules。macOS 上直接跑 ./setup.sh —— 它会用 DSH 自带运行时的 pnpm 重建这些依赖、创建分析 venv、并写入 profile 清单。此处列出的命令仅供手工排障。注意 macOS 上系统没有 npm，所以用 pnpm（经 DSH 自带 node 调用）。",
+      "rebuild": [
+        {
+          "dir": "presets/bio-research/tools/biotools",
+          "command": "pnpm install --prod --ignore-workspace"
+        },
+        {
+          "dir": "presets/bio-research/tools/zotero",
+          "command": "pnpm install --prod --ignore-workspace"
+        }
+      ],
+      "python": {
+        "note": "ncbi 与 tavotto 两个 MCP server 需要一个装了 ncbi-mcp / mcp 1.x / tavotto 的解释器。setup.sh 建在 $DSH_HOME/bio-research/venv，预设的行内 command 会优先使用它。",
+        "venv": "$DSH_HOME/bio-research/venv",
+        "packages": [
+          "ncbi-mcp",
+          "mcp>=1.0,<2",
+          "tavotto[worker]"
+        ]
+      }
+    }
+  }
+}
