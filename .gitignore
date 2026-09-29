@@ -3,6 +3,9 @@ node_modules/
 
 # 集群通道的运行时产物：askpass 由 dsh-cluster-ssh 在首次连接时生成，其中
 # password / otp 含明文密码与一次性动态口令。绝不允许提交。
+#
+# 注意：新版插件已把 askpass 移到 $DSH_HOME/bio-research/askpass（源码树之外），
+# 正常情况下这里不会有东西。保留这条只是给老版本留下的目录兜底。
 presets/bio-research/plugins/dsh-cluster-ssh/askpass/
 
 # 编辑器与 macOS 噪音

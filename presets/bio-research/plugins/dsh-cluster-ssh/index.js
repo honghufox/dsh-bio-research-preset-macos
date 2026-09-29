@@ -128,7 +128,18 @@ function toToolDefinition(definition) {
 }
 
 const HERE = dirname(fileURLToPath(import.meta.url))
-const ASKPASS_DIR = join(HERE, 'askpass')
+
+/**
+ * askpass 的落盘位置：**$DSH_HOME 下，不是插件目录里**。
+ *
+ * 原实现放在 `HERE/askpass`（插件自己旁边），而插件往往就住在源码仓库里——于是
+ * 明文密码与一次性口令会直接落在 git 工作区，只靠一条 `.gitignore` 兜着。任何一个
+ * `git add -f`、改错 .gitignore、或者打包分发时顺手 `tar` 一下，凭据就出去了。
+ * 放到 `$DSH_HOME` 之后，运行时产物与源码树彻底分开，这条风险不存在了。
+ *
+ * （bundle 里仍保留 `askpass/` 的 .gitignore 条目，兼容老版本留下的目录。）
+ */
+const ASKPASS_DIR = join(dshHome(), 'bio-research', 'askpass')
 const ASKPASS_SH = join(ASKPASS_DIR, 'askpass.sh')
 const PASSWORD_FILE = join(ASKPASS_DIR, 'password')
 const OTP_FILE = join(ASKPASS_DIR, 'otp')
