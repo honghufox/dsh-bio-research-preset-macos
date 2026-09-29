@@ -1,0 +1,14 @@
+# 安装/运行产物：随 bundle 分发但不提交，setup.sh 会重建。
+node_modules/
+
+# 集群通道的运行时产物：askpass 由 dsh-cluster-ssh 在首次连接时生成，其中
+# password / otp 含明文密码与一次性动态口令。绝不允许提交。
+presets/bio-research/plugins/dsh-cluster-ssh/askpass/
+
+# 编辑器与 macOS 噪音
+.DS_Store
+*.swp
+
+# Python 运行产物
+__pycache__/
+*.pyc
